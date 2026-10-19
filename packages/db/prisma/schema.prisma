@@ -1,0 +1,591 @@
+// LIGA TRACKER: schema del MVP
+// Origen: dbml ligatracker.txt, recortado al alcance del MVP
+// (ver /mnt/project-files/plan/plan-desarrollo-mvp.md).
+//
+// Convenciones:
+// - Toda tabla con datos de una liga lleva tenantId (desnormalizado) para
+//   filtrar por liga sin joins y habilitar RLS más adelante.
+// - Modelos en PascalCase, tablas y columnas en snake_case vía @@map / @map.
+// - Auditoría: createdBy obligatorio; updatedBy / deletedBy opcionales.
+// - Soft delete con deletedAt en entidades maestras.
+
+generator client {
+  provider      = "prisma-client-js"
+  // native: desarrollo; musl: imagen Docker node:22-alpine.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Plataforma SaaS, usuarios y RBAC
+// ─────────────────────────────────────────────────────────────
+
+enum SubscriptionStatus {
+  Prueba
+  Activa
+  Suspendida
+}
+
+model Tenant {
+  id                 String             @id @default(uuid()) @db.Uuid
+  name               String // Nombre comercial de la liga
+  slug               String             @unique // URL pública: /{slug}
+  logoUrl            String?            @map("logo_url")
+  contactPhone       String?            @map("contact_phone")
+  contactEmail       String?            @map("contact_email")
+  subscriptionStatus SubscriptionStatus @default(Prueba) @map("subscription_status")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  memberships     TenantUser[]
+  roles           Role[]
+  tournaments     Tournament[]
+  teams           Team[]
+  players         Player[]
+  venues          Venue[]
+  pitches         Pitch[]
+  tournamentTeams TournamentTeam[]
+  squads          Squad[]
+  rounds          TournamentRound[]
+  matches         Match[]
+  goals           MatchGoal[]
+  cards           MatchCard[]
+  sanctionRules   SanctionRule[]
+  suspensions     PlayerSuspension[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  isSuperAdmin Boolean  @default(false) @map("is_super_admin") // RF-00.0
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships             TenantUser[]
+  administeredTournaments Tournament[] @relation("TournamentAdmin")
+  representedTeams        Team[]       @relation("TeamRepresentative")
+  playerProfiles          Player[]     @relation("PlayerUser")
+
+  @@map("users")
+}
+
+/// Claims atómicos, ej. "partido:registrar-gol", "torneo:crear".
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+/// tenantId nulo = rol global del sistema (plantilla), ej. Administrador.
+model Role {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @map("tenant_id") @db.Uuid
+  name     String
+
+  tenant      Tenant?          @relation(fields: [tenantId], references: [id])
+  permissions RolePermission[]
+  members     TenantUserRole[]
+
+  @@unique([tenantId, name])
+  @@map("roles")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+/// Membresía de un usuario en una liga (una por liga).
+model TenantUser {
+  id       String   @id @default(uuid()) @db.Uuid
+  tenantId String   @map("tenant_id") @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  isActive Boolean  @default(true) @map("is_active")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id])
+  user   User             @relation(fields: [userId], references: [id])
+  roles  TenantUserRole[]
+
+  @@unique([tenantId, userId])
+  @@map("tenant_users")
+}
+
+/// Corrección: una persona puede tener varios roles en la misma liga.
+model TenantUserRole {
+  tenantUserId String @map("tenant_user_id") @db.Uuid
+  roleId       String @map("role_id") @db.Uuid
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+  role       Role       @relation(fields: [roleId], references: [id])
+
+  @@id([tenantUserId, roleId])
+  @@map("tenant_user_roles")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Torneos y reglas
+// ─────────────────────────────────────────────────────────────
+
+enum TournamentStatus {
+  Borrador
+  Inscripcion
+  En_Curso
+  Finalizado
+}
+
+enum TournamentBranch {
+  Masculino
+  Femenino
+  Mixto
+}
+
+enum TournamentCategory {
+  Benjamin
+  Alevin
+  Infantil
+  Cadete
+  Juvenil
+  Sub20
+  Sub23
+  Aficionado
+  TerceraDivision
+  SegundaDivision
+  PrimeraDivision
+  Libre
+  Veteranos
+}
+
+model Tournament {
+  id           String              @id @default(uuid()) @db.Uuid
+  tenantId     String              @map("tenant_id") @db.Uuid
+  name         String
+  slug         String // URL pública: /{tenant}/{slug}
+  description  String?
+  category     TournamentCategory?
+  branch       TournamentBranch?
+  status       TournamentStatus    @default(Borrador)
+  maxTeams     Int                 @map("max_teams")
+  logoUrl      String?             @map("logo_url")
+  contactPhone String?             @map("contact_phone")
+  contactEmail String?             @map("contact_email")
+  isPublic     Boolean             @default(true) @map("is_public")
+  adminId      String              @map("admin_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  createdBy String    @map("created_by") @db.Uuid
+  updatedBy String?   @map("updated_by") @db.Uuid
+  deletedBy String?   @map("deleted_by") @db.Uuid
+
+  tenant        Tenant            @relation(fields: [tenantId], references: [id])
+  admin         User              @relation("TournamentAdmin", fields: [adminId], references: [id])
+  rules         TournamentRules?
+  teams         TournamentTeam[]
+  rounds        TournamentRound[]
+  matches       Match[]
+  sanctionRules SanctionRule[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, status])
+  @@map("tournaments")
+}
+
+enum TieBreaker {
+  Diferencia_Goles
+  Goles_Favor
+  Duelo_Directo
+  Fair_Play
+}
+
+/// Extensión 1 a 1 de Tournament. Campos nuevos respecto al DBML marcados con (+).
+model TournamentRules {
+  tournamentId         String       @id @map("tournament_id") @db.Uuid
+  tenantId             String       @map("tenant_id") @db.Uuid
+  playersPerTeam       Int          @map("players_per_team") // Fútbol-N
+  matchDurationMinutes Int          @map("match_duration_minutes")
+  extraTimeMinutes     Int          @default(0) @map("extra_time_minutes")
+  penaltyShootoutCount Int          @default(5) @map("penalty_shootout_count")
+  doubleRoundRobin     Boolean      @default(true) @map("double_round_robin") // (+) ida y vuelta espejo
+  pointsWin            Int          @default(3) @map("points_win") // (+)
+  pointsDraw           Int          @default(1) @map("points_draw") // (+)
+  pointsLoss           Int          @default(0) @map("points_loss") // (+)
+  walkoverGoals        Int          @default(3) @map("walkover_goals") // (+) RF-14, marcador 3-0
+  minSquadSize         Int          @default(7) @map("min_squad_size") // (+) RF-08
+  maxSquadSize         Int          @default(20) @map("max_squad_size") // (+) RF-08
+  tieBreakers          TieBreaker[] @default([Diferencia_Goles, Goles_Favor, Duelo_Directo]) @map("tie_breakers") // (+) RF-24
+  // Post-MVP (v1.1): has_liguilla, knockout_qualifiers, liguilla_qualifiers
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@map("tournament_rules")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sedes
+// ─────────────────────────────────────────────────────────────
+
+model Venue {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  name     String
+  address  String?
+  isActive Boolean @default(true) @map("is_active")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  pitches Pitch[]
+
+  @@index([tenantId])
+  @@map("venues")
+}
+
+model Pitch {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  venueId     String   @map("venue_id") @db.Uuid
+  name        String
+  hasLighting Boolean  @default(false) @map("has_lighting")
+  usageCost   Decimal? @map("usage_cost") @db.Decimal(10, 2)
+  isActive    Boolean  @default(true) @map("is_active")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  venue   Venue   @relation(fields: [venueId], references: [id])
+  matches Match[]
+
+  @@index([tenantId])
+  @@map("pitches")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Equipos, jugadores y plantillas
+// ─────────────────────────────────────────────────────────────
+
+enum PlayerPosition {
+  Portero
+  Defensa_Central
+  Lateral_Derecho
+  Lateral_Izquierdo
+  Mediocentro_Defensivo
+  Mediocentro
+  Mediocampista_Derecho
+  Mediocampista_Izquierdo
+  Mediocentro_Ofensivo
+  Extremo_Derecho
+  Extremo_Izquierdo
+  Delantero_Centro
+  Universal
+}
+
+enum SquadStatus {
+  Activo
+  Baja_Lesion
+  Baja_Definitiva
+}
+
+model Team {
+  id                   String   @id @default(uuid()) @db.Uuid
+  tenantId             String   @map("tenant_id") @db.Uuid
+  name                 String
+  description          String?
+  logoUrl              String?  @map("logo_url")
+  primaryColor         String   @map("primary_color")
+  // En el MVP el representante puede ser solo un contacto, sin cuenta (RF-07).
+  representativeId     String?  @map("representative_id") @db.Uuid
+  representativeName   String?  @map("representative_name")
+  representativePhones String[] @map("representative_phones")
+  representativeEmail  String?  @map("representative_email")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  createdBy String    @map("created_by") @db.Uuid
+  updatedBy String?   @map("updated_by") @db.Uuid
+  deletedBy String?   @map("deleted_by") @db.Uuid
+
+  tenant         Tenant           @relation(fields: [tenantId], references: [id])
+  representative User?            @relation("TeamRepresentative", fields: [representativeId], references: [id])
+  tournaments    TournamentTeam[]
+
+  @@unique([tenantId, name])
+  @@map("teams")
+}
+
+/// Inscripción de un equipo a un torneo.
+model TournamentTeam {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  tournamentId     String   @map("tournament_id") @db.Uuid
+  teamId           String   @map("team_id") @db.Uuid
+  registrationDate DateTime @default(now()) @map("registration_date")
+
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  tournament  Tournament @relation(fields: [tournamentId], references: [id])
+  team        Team       @relation(fields: [teamId], references: [id])
+  squads      Squad[]
+  homeMatches Match[]    @relation("HomeTeam")
+  awayMatches Match[]    @relation("AwayTeam")
+
+  @@unique([tournamentId, teamId])
+  @@index([tenantId])
+  @@map("tournament_teams")
+}
+
+model Player {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  userId         String?   @map("user_id") @db.Uuid // si el representante también juega
+  firstName      String    @map("first_name")
+  lastName       String    @map("last_name")
+  // Opcional para menores (HU-3.2); único por liga cuando existe (RF-08).
+  documentNumber String?   @map("document_number")
+  birthDate      DateTime? @map("birth_date") @db.Date
+  photoUrl       String?   @map("photo_url") // obligatoria al cerrar inscripción, no al crear
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  createdBy String    @map("created_by") @db.Uuid
+  updatedBy String?   @map("updated_by") @db.Uuid
+  deletedBy String?   @map("deleted_by") @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  user   User?   @relation("PlayerUser", fields: [userId], references: [id])
+  squads Squad[]
+
+  @@unique([tenantId, documentNumber])
+  @@map("players")
+}
+
+/// Jugador dentro de la plantilla de un equipo inscrito en un torneo.
+model Squad {
+  id               String         @id @default(uuid()) @db.Uuid
+  tenantId         String         @map("tenant_id") @db.Uuid
+  tournamentTeamId String         @map("tournament_team_id") @db.Uuid
+  playerId         String         @map("player_id") @db.Uuid
+  squadNumber      Int            @map("squad_number")
+  position         PlayerPosition
+  status           SquadStatus    @default(Activo)
+  registeredAt     DateTime       @default(now()) @map("registered_at")
+  unregisteredAt   DateTime?      @map("unregistered_at")
+
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  tournamentTeam TournamentTeam     @relation(fields: [tournamentTeamId], references: [id])
+  player         Player             @relation(fields: [playerId], references: [id])
+  goals          MatchGoal[]        @relation("Scorer")
+  assists        MatchGoal[]        @relation("Assist")
+  cards          MatchCard[]
+  suspensions    PlayerSuspension[]
+
+  @@unique([tournamentTeamId, playerId])
+  @@unique([tournamentTeamId, squadNumber])
+  @@index([tenantId])
+  @@map("squads")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Calendario y partidos
+// ─────────────────────────────────────────────────────────────
+
+enum MatchStatus {
+  Programado
+  En_Curso
+  Finalizado
+  Suspendido
+  Cancelado
+  Walkover
+}
+
+enum MatchPhase {
+  Regular
+  Liguilla
+  Eliminatoria
+  Final
+}
+
+model TournamentRound {
+  id           String     @id @default(uuid()) @db.Uuid
+  tenantId     String     @map("tenant_id") @db.Uuid
+  tournamentId String     @map("tournament_id") @db.Uuid
+  roundNumber  Int        @map("round_number")
+  name         String
+  phase        MatchPhase @default(Regular)
+  startDate    DateTime?  @map("start_date") @db.Date
+  endDate      DateTime?  @map("end_date") @db.Date
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  matches    Match[]
+
+  @@unique([tournamentId, phase, roundNumber])
+  @@map("tournament_rounds")
+}
+
+// CHECK (home_team_id <> away_team_id) se agrega a mano en la migración SQL,
+// porque Prisma no soporta CHECK constraints en el schema.
+model Match {
+  id               String      @id @default(uuid()) @db.Uuid
+  tenantId         String      @map("tenant_id") @db.Uuid
+  tournamentId     String      @map("tournament_id") @db.Uuid
+  roundId          String      @map("round_id") @db.Uuid
+  homeTeamId       String      @map("home_team_id") @db.Uuid
+  awayTeamId       String      @map("away_team_id") @db.Uuid
+  pitchId          String?     @map("pitch_id") @db.Uuid
+  scheduledAt      DateTime?   @map("scheduled_at")
+  status           MatchStatus @default(Programado)
+  homeScore        Int         @default(0) @map("home_score")
+  awayScore        Int         @default(0) @map("away_score")
+  homePenaltyScore Int?        @map("home_penalty_score")
+  awayPenaltyScore Int?        @map("away_penalty_score")
+  // (+) En W.O. indica quién gana; también servirá en eliminatorias.
+  winnerTeamId     String?     @map("winner_team_id") @db.Uuid
+  notes            String?
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  createdBy String    @map("created_by") @db.Uuid
+  updatedBy String?   @map("updated_by") @db.Uuid
+  deletedBy String?   @map("deleted_by") @db.Uuid
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id])
+  tournament        Tournament         @relation(fields: [tournamentId], references: [id])
+  round             TournamentRound    @relation(fields: [roundId], references: [id])
+  homeTeam          TournamentTeam     @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeam          TournamentTeam     @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  pitch             Pitch?             @relation(fields: [pitchId], references: [id])
+  goals             MatchGoal[]
+  cards             MatchCard[]
+  servedSuspensions SuspensionServed[]
+
+  @@index([pitchId, scheduledAt]) // detección de choques de cancha
+  @@index([tournamentId, status])
+  @@map("matches")
+}
+
+/// Corrección: se quita team_id (redundante con squad). Si isOwnGoal,
+/// el gol suma al rival del equipo del jugador.
+model MatchGoal {
+  id            String  @id @default(uuid()) @db.Uuid
+  tenantId      String  @map("tenant_id") @db.Uuid
+  matchId       String  @map("match_id") @db.Uuid
+  squadId       String  @map("squad_id") @db.Uuid
+  assistSquadId String? @map("assist_squad_id") @db.Uuid // (+) líder de asistencias
+  minute        Int?
+  isOwnGoal     Boolean @default(false) @map("is_own_goal")
+  isPenalty     Boolean @default(false) @map("is_penalty")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  match  Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  squad  Squad  @relation("Scorer", fields: [squadId], references: [id])
+  assist Squad? @relation("Assist", fields: [assistSquadId], references: [id])
+
+  @@index([matchId])
+  @@map("match_goals")
+}
+
+enum CardType {
+  Amarilla
+  Doble_Amarilla
+  Roja_Directa
+}
+
+model MatchCard {
+  id       String   @id @default(uuid()) @db.Uuid
+  tenantId String   @map("tenant_id") @db.Uuid
+  matchId  String   @map("match_id") @db.Uuid
+  squadId  String   @map("squad_id") @db.Uuid
+  cardType CardType @map("card_type")
+  minute   Int?
+  reason   String?
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id])
+  match       Match              @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  squad       Squad              @relation(fields: [squadId], references: [id])
+  suspensions PlayerSuspension[]
+
+  @@index([matchId])
+  @@index([squadId])
+  @@map("match_cards")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sanciones (versión básica del MVP)
+// ─────────────────────────────────────────────────────────────
+
+enum SuspensionStatus {
+  Activa
+  Cumplida
+  Pagada_Redimida
+  Anulada_Apelacion
+}
+
+model SanctionRule {
+  id                    String   @id @default(uuid()) @db.Uuid
+  tenantId              String   @map("tenant_id") @db.Uuid
+  tournamentId          String   @map("tournament_id") @db.Uuid
+  cardType              CardType @map("card_type")
+  accumulationThreshold Int?     @map("accumulation_threshold") // ej. 3 amarillas; nulo en rojas
+  matchesSuspended      Int      @default(1) @map("matches_suspended")
+  redemptionFineAmount  Decimal? @map("redemption_fine_amount") @db.Decimal(10, 2) // v1.2
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, cardType])
+  @@map("tournament_sanction_rules")
+}
+
+model PlayerSuspension {
+  id               String           @id @default(uuid()) @db.Uuid
+  tenantId         String           @map("tenant_id") @db.Uuid
+  squadId          String           @map("squad_id") @db.Uuid
+  // Tarjeta que disparó la sanción (en acumulación, la que alcanzó el umbral).
+  matchCardId      String?          @map("match_card_id") @db.Uuid
+  matchesSuspended Int              @map("matches_suspended")
+  status           SuspensionStatus @default(Activa)
+  adminNotes       String?          @map("admin_notes") // apelaciones (RF-23)
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  updatedBy        String?          @map("updated_by") @db.Uuid
+
+  tenant    Tenant             @relation(fields: [tenantId], references: [id])
+  squad     Squad              @relation(fields: [squadId], references: [id])
+  matchCard MatchCard?         @relation(fields: [matchCardId], references: [id])
+  served    SuspensionServed[]
+
+  @@index([squadId, status])
+  @@map("player_suspensions")
+}
+
+/// (+) Reemplaza el contador matches_served: registra en qué partidos se
+/// cumplió la sanción, así se puede recalcular si se corrige un resultado.
+model SuspensionServed {
+  suspensionId String @map("suspension_id") @db.Uuid
+  matchId      String @map("match_id") @db.Uuid
+
+  suspension PlayerSuspension @relation(fields: [suspensionId], references: [id], onDelete: Cascade)
+  match      Match            @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@id([suspensionId, matchId])
+  @@map("suspension_served")
+}

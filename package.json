@@ -1,0 +1,32 @@
+{
+  "name": "ligatracker",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "pnpm --filter @ligatracker/db generate",
+    "db:migrate": "pnpm --filter @ligatracker/db migrate:dev",
+    "db:deploy": "pnpm --filter @ligatracker/db migrate:deploy",
+    "db:seed": "pnpm --filter @ligatracker/db seed"
+  },
+  "devDependencies": {
+    "turbo": "^2.11.9",
+    "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "sharp",
+      "@tailwindcss/oxide"
+    ]
+  }
+}
