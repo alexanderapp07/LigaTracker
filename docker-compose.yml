@@ -1,0 +1,35 @@
+# Desarrollo local: solo PostgreSQL. La app corre con `pnpm dev`.
+# Para probar la imagen de producción: docker compose --profile app up --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ligatracker
+      POSTGRES_PASSWORD: ligatracker
+      POSTGRES_DB: ligatracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ligatracker"]
+      interval: 5s
+      retries: 10
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ligatracker:ligatracker@db:5432/ligatracker
+      AUTH_SECRET: ${AUTH_SECRET}
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

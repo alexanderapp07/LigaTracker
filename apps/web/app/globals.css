@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* Tokens de Estándares.docx (Capítulo 1). */
+:root {
+  --background: #f3f4f6;
+  --card: #ffffff;
+  --foreground: #111827;
+  --muted: #6b7280;
+  --primary: #10b981;
+  --success: #22c55e; /* El documento indica verde; #3B82F6 era azul. */
+  --destructive: #ef4444;
+  --card-shadow: 0 2px 4px rgb(0 0 0 / 0.05);
+  --card-border: transparent;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: #0a0a0a;
+    --card: #171717;
+    --foreground: #f9fafb;
+    --muted: #a1a1aa;
+    --card-shadow: none;
+    --card-border: rgb(161 161 170 / 0.2);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --background: #0a0a0a;
+  --card: #171717;
+  --foreground: #f9fafb;
+  --muted: #a1a1aa;
+  --card-shadow: none;
+  --card-border: rgb(161 161 170 / 0.2);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-success: var(--success);
+  --color-destructive: var(--destructive);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+/* Data / Tabular: obligatorio en tablas, marcadores y minutos. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
